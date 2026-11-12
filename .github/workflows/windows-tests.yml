@@ -1,0 +1,27 @@
+name: Windows script regression
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  regression:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run all checks through the File entry point
+        shell: pwsh
+        run: |
+          $hostExe = (Get-Command '${{ matrix.shell }}.exe' -CommandType Application -ErrorAction Stop).Source
+          & $hostExe -NoProfile -File ./tests/run-regressions.ps1 -EvidenceDir ./test-results/${{ matrix.shell }}
+          exit $LASTEXITCODE
+      - name: Preserve diagnostics for this host
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-${{ matrix.shell }}
+          path: test-results/${{ matrix.shell }}

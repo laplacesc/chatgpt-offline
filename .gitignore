@@ -2,6 +2,7 @@
 pkg/*.msix
 pkg/*.msixbundle
 pkg/*.appx
+pkg/*.download/
 
 # 运行日志
 log/*.log

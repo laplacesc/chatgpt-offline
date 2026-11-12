@@ -9,6 +9,10 @@
 .PARAMETER PackagePath
     指定 MSIX 路径。省略时自动在 pkg\ 目录中按当前 CPU 架构查找。
 
+.PARAMETER InstallDrive
+    指定本地 NTFS 安装盘（如 D:）。由 Windows 管理包目录，自动跳过整机预置。
+    已安装在其他盘时先尝试迁移，迁移失败则停止。
+
 .PARAMETER Force
     发现已安装时不再询问，直接覆盖/降级安装。
 
@@ -18,16 +22,23 @@
 .PARAMETER NoPause
     结束时不等待按键，便于在自动化流程中调用。
 
+.PARAMETER ResultPath
+    启动器使用的完成结果文件，记录退出码和日志位置。
+
 .EXAMPLE
     .\install-chatgpt-desktop.ps1
     .\install-chatgpt-desktop.ps1 -PackagePath D:\ChatGPT-x64.msix -Force
+    .\install-chatgpt-desktop.ps1 -InstallDrive D:
 #>
 [CmdletBinding()]
 param(
     [string] $PackagePath,
+    [string] $InstallDrive,
     [switch] $Force,
     [switch] $SkipProvision,
-    [switch] $NoPause
+    [switch] $NoPause,
+    [string] $ResultPath,
+    [string] $OriginatingUserSid
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +49,9 @@ $exitCode = 0
 
 try {
     Write-Banner 'ChatGPT 桌面版 · 离线安装'
+    Assert-AppxHost
+    Assert-OriginatingAccount -OriginatingUserSid $OriginatingUserSid
+    $isDowngrade = $false
 
     # ---------------------------------------------------------
     # 1. 环境自检
@@ -47,12 +61,22 @@ try {
     $isAdmin = Test-IsAdmin
     $arch    = Get-SystemArch
     $build   = Get-OsBuild
-    $freeGB  = Get-FreeSpaceGB
+    $target  = $null
+    $spaceDrive = $env:SystemDrive
+    if ($InstallDrive) {
+        $target = Get-InstallTarget -Drive $InstallDrive
+        if (-not $target.Volume -and -not $isAdmin) {
+            throw "首次在 $($target.Drive) 创建应用卷需要管理员权限，请以管理员身份重新运行。"
+        }
+        $spaceDrive = $target.Drive
+        Write-Info "指定安装盘: $($target.Drive)（自动跳过整机预置）"
+    }
+    $freeGB = Get-FreeSpaceGB -DriveLetter $spaceDrive
 
     Write-Info "操作系统  : Windows Build $build"
     Write-Info "CPU 架构  : $arch"
     Write-Info "管理员权限: $(if ($isAdmin) { '是' } else { '否' })"
-    Write-Info "可用空间  : $(if ($freeGB -ge 0) { "$freeGB GB ($env:SystemDrive)" } else { '未知' })"
+    Write-Info "可用空间  : $(if ($freeGB -ge 0) { "$freeGB GB ($spaceDrive)" } else { '未知' })"
 
     if ($build -lt $MinOsBuild) {
         throw "系统版本过低：需要 Windows 10 Build $MinOsBuild（2004 版）或更高，当前为 Build $build。"
@@ -61,7 +85,7 @@ try {
         throw 'ChatGPT 桌面版不支持 32 位系统，请在 64 位（x64 或 arm64）Windows 上安装。'
     }
     if ($freeGB -ge 0 -and $freeGB -lt $RequiredFreeGB) {
-        throw "磁盘空间不足：安装过程约需 $RequiredFreeGB GB，当前 $env:SystemDrive 仅剩 $freeGB GB。"
+        throw "磁盘空间不足：安装过程约需 $RequiredFreeGB GB，当前 $spaceDrive 仅剩 $freeGB GB。"
     }
     Write-Ok '环境检查通过'
     Write-Host ''
@@ -89,7 +113,7 @@ try {
     Write-Info "路径: $($file.FullName)"
 
     if ($file.Length -lt 100MB) {
-        throw "安装包只有 $(Format-Size $file.Length)，明显小于正常体积（约 800 MB），文件很可能没下载完整。请删除后重新下载。"
+        throw "安装包只有 $(Format-Size $file.Length)，明显小于正常体积（通常为数百 MB 至约 1 GB，随版本变化），文件很可能没下载完整。请删除后重新下载。"
     }
 
     $info = Get-MsixInfo -Path $msix
@@ -109,22 +133,19 @@ try {
     # ---------------------------------------------------------
     Write-Step '校验数字签名'
     $sig = Test-MsixSignature -Path $msix
-    if ($sig.Valid) {
-        Write-Info "签名主体: $($sig.Subject)"
-        Write-Info "颁发机构: $($sig.Issuer)"
-        Write-Ok '签名有效，来源可信'
-    } else {
-        Write-Warn2 "签名状态：$($sig.Status)"
-        if (-not $Force) {
-            throw '数字签名校验未通过，安装已中止。若确认文件来源可靠，可加 -Force 参数强制继续。'
-        }
-        Write-Warn2 '已指定 -Force，跳过签名校验继续安装。'
-    }
+    Assert-TrustedMsixIdentity -Info $info -Signature $sig
+    Write-Info "签名主体: $($sig.Subject)"
+    Write-Info "颁发机构: $($sig.Issuer)"
+    Write-Ok '官方包身份与数字签名校验通过'
     Write-Host ''
 
     # ---------------------------------------------------------
     # 4. 处理已安装的版本
     # ---------------------------------------------------------
+    # 先校验签名，再由清单判断权限要求；不影响不含服务的旧版按用户安装。
+    if ($info.RequiresAdmin -and -not $isAdmin) {
+        throw '0x80073D28：安装包声明了系统服务，必须以管理员身份安装。'
+    }
     Write-Step '检查已安装版本'
     $existing = Get-InstalledChatGpt
 
@@ -135,6 +156,11 @@ try {
         Write-Info "即将安装  : $newVer"
 
         if ($curVer -eq $newVer -and -not $Force) {
+            if ($target) {
+                $null = Initialize-InstallVolume -Target $target -IsAdmin $isAdmin
+                Move-ChatGptToVolume -Package $existing -Target $target
+                $existing = Get-InstalledChatGpt
+            }
             Write-Ok '已是相同版本，无需重复安装。'
             Write-Info '如需强制重装，请使用 -Force 参数。'
             Write-Host ''
@@ -147,9 +173,13 @@ try {
                 $ans = Read-Host '是否继续？输入 Y 确认，其他键取消'
                 if ($ans -notmatch '^[Yy]') { Write-Warn2 '已取消。'; return }
             }
-            Write-Step '卸载现有版本以便降级'
-            Remove-AppxPackage -Package $existing.PackageFullName -ErrorAction Stop
-            Write-Ok '已卸载旧版本'
+            # Supported in-place deployment preserves registration/data if deployment fails.
+            # Never fall back to Remove-AppxPackage on older hosts or deployment errors.
+            if (-not (Get-Command Add-AppxPackage -ErrorAction Stop).Parameters.ContainsKey('ForceUpdateFromAnyVersion')) {
+                throw '当前 Appx 模块不支持 ForceUpdateFromAnyVersion，就地降级不可用；已保留现有应用，未执行卸载。'
+            }
+            $isDowngrade = $true
+            Write-Info '使用 ForceUpdateFromAnyVersion 就地降级，部署失败时不主动卸载原应用。'
         } else {
             Write-Info '将就地升级到新版本。'
         }
@@ -187,7 +217,17 @@ try {
     Write-Info '安装包体积较大，请耐心等待 1-5 分钟，期间请勿关闭窗口…'
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Add-AppxPackage -Path $msix -ForceApplicationShutdown -ErrorAction Stop
+    $installParams = @{
+        Path = $msix
+        ForceApplicationShutdown = $true
+        ErrorAction = 'Stop'
+    }
+    if ($isDowngrade) { $installParams.ForceUpdateFromAnyVersion = $true }
+    if ($target) {
+        $installParams.Volume = Initialize-InstallVolume -Target $target -IsAdmin $isAdmin
+        if ($existing) { Move-ChatGptToVolume -Package $existing -Target $target }
+    }
+    Add-AppxPackage @installParams
     $sw.Stop()
     Write-Ok "当前用户安装完成，用时 $([math]::Round($sw.Elapsed.TotalSeconds)) 秒"
     Write-Host ''
@@ -195,7 +235,11 @@ try {
     # ---------------------------------------------------------
     # 7. 整机预置（供所有用户使用）
     # ---------------------------------------------------------
-    if ($SkipProvision) {
+    if ($isDowngrade) {
+        Write-Warn2 '本次仅降级当前用户，跳过整机预置；其他用户及已有整机预置版本不会被降级。'
+    } elseif ($target) {
+        Write-Info '已指定安装盘，跳过整机预置，避免再次在系统盘部署。其他用户需各自安装。'
+    } elseif ($SkipProvision) {
         Write-Info '已指定 -SkipProvision，跳过整机预置。'
     } elseif (-not $isAdmin) {
         Write-Warn2 '当前没有管理员权限，已跳过整机预置。'
@@ -224,6 +268,10 @@ try {
     Write-Step '校验安装结果'
     $now = Get-InstalledChatGpt
     if (-not $now) { throw '安装命令已执行，但系统中查询不到该应用，安装可能未生效。' }
+    if ([version]$now.Version -ne [version]$info.Version) { throw '安装后的版本与目标版本不一致，请检查 Windows 应用部署日志。' }
+    if ($target -and -not (Test-PackageOnDrive -Package $now -Drive $target.Drive)) {
+        throw "应用已注册，但安装位置不在指定盘 $($target.Drive)：$($now.InstallLocation)"
+    }
 
     Write-Ok "$AppDisplayName $($now.Version) 安装成功"
     Write-Info "安装位置: $($now.InstallLocation)"
@@ -257,6 +305,12 @@ try {
     if (-not $NoPause) {
         Write-Host '按任意键关闭窗口…' -ForegroundColor DarkGray
         try { $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { Read-Host | Out-Null }
+    }
+    try {
+        Write-AppResult -Path $ResultPath -Operation 'install' -ExitCode $exitCode -LogPath $logFile
+    } catch {
+        Write-Err2 "无法写入安装结果：$($_.Exception.Message)"
+        $exitCode = 1
     }
     exit $exitCode
 }
