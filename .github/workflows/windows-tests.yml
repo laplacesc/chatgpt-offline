@@ -13,9 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run all checks through the File entry point
-        shell: ${{ matrix.shell }}
+        shell: pwsh
         run: |
-          $hostExe = (Get-Process -Id $PID).Path
+          $hostExe = (Get-Command '${{ matrix.shell }}.exe' -CommandType Application -ErrorAction Stop).Source
           & $hostExe -NoProfile -File ./tests/run-regressions.ps1 -EvidenceDir ./test-results/${{ matrix.shell }}
           exit $LASTEXITCODE
       - name: Preserve diagnostics for this host
