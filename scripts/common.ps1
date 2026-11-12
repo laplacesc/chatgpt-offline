@@ -11,7 +11,6 @@ $script:AppFamilyName    = 'OpenAI.Codex_2p2nqsd0c76g0'
 $script:AppDisplayName   = 'ChatGPT'
 $script:AppPublisher     = 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B'
 $script:AppServiceName   = 'CodexSandboxService.OpenAI.Codex'
-$script:StoreProductId   = '9PLM9XGG6VKS'
 $script:MinOsBuild       = 19041          # Windows 10 2004
 $script:RequiredFreeGB   = 3
 
@@ -65,10 +64,7 @@ function Start-AppLog {
     $path  = Join-Path $script:LogDir "$Name-$stamp.log"
     try {
         Start-Transcript -Path $path -Force | Out-Null
-        $script:LogPath = $path
-    } catch {
-        $script:LogPath = $null
-    }
+    } catch { }
     return $path
 }
 
@@ -76,9 +72,42 @@ function Stop-AppLog {
     try { Stop-Transcript | Out-Null } catch { }
 }
 
+function Write-AppResult {
+    param(
+        [string]$Path,
+        [Parameter(Mandatory)][string]$Operation,
+        [Parameter(Mandatory)][int]$ExitCode,
+        [string]$LogPath
+    )
+    if (-not $Path) { return }
+    $result = [ordered]@{
+        Operation = $Operation
+        ExitCode = $ExitCode
+        LogPath = $LogPath
+        CompletedAt = (Get-Date).ToString('o')
+    }
+    # 同目录写入后再替换，读取方不会误把半写入的文件当成完成结果。
+    $temporary = "$Path.$PID.tmp"
+    try {
+        $json = $result | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($temporary, $json, (New-Object Text.UTF8Encoding($true)))
+        Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
 # ============================================================
 #  环境检测
 # ============================================================
+function Assert-AppxHost {
+    # Windows 10 的 Appx 模块在 PowerShell 7 中可能被错误地当作兼容模块加载。
+    # 直接调用 .ps1 时也在任何部署操作前给出明确的重试方式。
+    if ($PSVersionTable.PSEdition -ne 'Desktop') {
+        throw '安装和卸载需要 Windows PowerShell 5.1。请运行对应的 .bat，或使用 powershell.exe -NoProfile -ExecutionPolicy Bypass -File <脚本路径>。不要使用 pwsh。'
+    }
+}
+
 function Test-IsAdmin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $pr = New-Object Security.Principal.WindowsPrincipal($id)
@@ -127,6 +156,61 @@ function Get-FreeSpaceGB {
 }
 
 # ============================================================
+#  自定义安装卷
+# ============================================================
+function Get-InstallTarget {
+    param([Parameter(Mandatory)][string]$Drive)
+
+    if ($Drive -notmatch '^[A-Za-z]:\\?$') {
+        throw '安装盘格式无效：请指定盘符（如 D: 或 D:\），不能指定任意文件夹。'
+    }
+    $driveName = $Drive.TrimEnd('\').ToUpperInvariant()
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$driveName'" -ErrorAction Stop
+    if (-not $disk) { throw "安装盘 $driveName 不存在或尚未就绪。" }
+    if ($disk.DriveType -ne 3) { throw "安装盘 $driveName 必须是本地固定磁盘。" }
+    if ($disk.FileSystem -ne 'NTFS') { throw "安装盘 $driveName 必须使用 NTFS 文件系统。" }
+
+    # 枚举后筛选，避免尚未注册的磁盘在按路径查询时被 Windows 当作无效卷报错。
+    $volume = Get-AppxVolume -ErrorAction Stop |
+        Where-Object { $_ -and ([string]$_.PackageStorePath).StartsWith("$driveName\", [StringComparison]::OrdinalIgnoreCase) } |
+        Select-Object -First 1
+    if ($volume -and $volume.IsOffline) { throw "安装盘 $driveName 的应用卷处于离线状态，请先在 Windows 中使其联机。" }
+    return [pscustomobject]@{
+        Drive = $driveName
+        Volume = $volume
+    }
+}
+
+function Initialize-InstallVolume {
+    param([Parameter(Mandatory)]$Target, [bool]$IsAdmin)
+
+    if ($Target.Volume) { return $Target.Volume }
+    if (-not $IsAdmin) { throw "首次在 $($Target.Drive) 创建应用卷需要管理员权限，请以管理员身份重新运行。" }
+    $volume = Add-AppxVolume -Path "$($Target.Drive)\WindowsApps" -ErrorAction Stop
+    if (-not $volume) { throw "未能在 $($Target.Drive) 创建应用卷。" }
+    $Target.Volume = $volume
+    return $volume
+}
+
+function Test-PackageOnDrive {
+    param([Parameter(Mandatory)]$Package, [Parameter(Mandatory)][string]$Drive)
+    return ([string]$Package.InstallLocation).StartsWith("$Drive\", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Move-ChatGptToVolume {
+    param([Parameter(Mandatory)]$Package, [Parameter(Mandatory)]$Target)
+    if (Test-PackageOnDrive -Package $Package -Drive $Target.Drive) { return }
+    Write-Step "将已安装的应用迁移到 $($Target.Drive)"
+    Write-Info '请先完全退出 ChatGPT；若系统禁止移动此包，脚本会停止并保留原安装。'
+    Move-AppxPackage -Package $Package.PackageFullName -Volume $Target.Volume -ErrorAction Stop
+    $moved = Get-InstalledChatGpt
+    if (-not $moved -or -not (Test-PackageOnDrive -Package $moved -Drive $Target.Drive)) {
+        throw '迁移命令已执行，但应用位置未变更到指定磁盘。请检查 Windows 应用部署日志。'
+    }
+    Write-Ok "应用已迁移到 $($Target.Drive)"
+}
+
+# ============================================================
 #  MSIX 包信息
 # ============================================================
 function Get-MsixInfo {
@@ -136,7 +220,8 @@ function Get-MsixInfo {
     #>
     param([Parameter(Mandatory)][string]$Path)
 
-    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
     $zip = $null
     try {
         $zip   = [System.IO.Compression.ZipFile]::OpenRead($Path)
@@ -155,6 +240,7 @@ function Get-MsixInfo {
             Architecture = $identity.ProcessorArchitecture
             Publisher    = $identity.Publisher
             DisplayName  = $xml.Package.Properties.DisplayName
+            RequiresAdmin = ($xml.SelectNodes("//*[local-name()='Extension' and @Category='windows.service']").Count -gt 0)
         }
     } finally {
         if ($zip) { $zip.Dispose() }
@@ -172,8 +258,55 @@ function Test-MsixSignature {
     }
 }
 
+function Assert-TrustedMsixIdentity {
+    param([Parameter(Mandatory)]$Info, [Parameter(Mandatory)]$Signature)
+    # Valid alone authenticates any trusted publisher. Identity is never bypassed by -Force.
+    if ($Info.Name -cne $script:AppPackageName -or $Info.Publisher -ine $script:AppPublisher) {
+        throw "安装包身份不受信任：必须是 $script:AppPackageName，发布者 $script:AppPublisher。"
+    }
+    if (-not $Signature.Valid -or $Signature.Subject -ine $script:AppPublisher -or
+        $Signature.Subject -ine $Info.Publisher) {
+        throw '数字签名或发布者校验未通过：签名必须有效，且主体必须与官方清单发布者一致；-Force 不会跳过此检查。'
+    }
+}
+
 function Get-InstalledChatGpt {
-    Get-AppxPackage -Name $script:AppPackageName -ErrorAction SilentlyContinue
+    param([switch]$AllUsers)
+    Get-AppxPackage -Name $script:AppPackageName -Publisher $script:AppPublisher -AllUsers:$AllUsers -ErrorAction Stop |
+        Where-Object { $_.Name -ceq $script:AppPackageName -and
+            $_.Publisher -ieq $script:AppPublisher -and $_.PackageFamilyName -ceq $script:AppFamilyName }
+}
+
+function Get-ProvisionedChatGpt {
+    # DISM exposes PackageName rather than Publisher. Its final component is the publisher ID.
+    Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object {
+        $_.DisplayName -ceq $script:AppPackageName -and
+        $_.PackageName -cmatch '^OpenAI\.Codex_\d+\.\d+\.\d+\.\d+_(x64|arm64|neutral)_[^_]*_2p2nqsd0c76g0$'
+    }
+}
+
+function Get-CurrentAccountSid {
+    return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
+function Assert-OriginatingAccount {
+    param([string]$OriginatingUserSid)
+    if ($OriginatingUserSid -and $OriginatingUserSid -ne (Get-CurrentAccountSid)) {
+        throw '提权后的账户身份与发起账户不同，已在部署或数据清理前停止。请使用同一账户确认 UAC；不支持输入其他管理员账户凭据。'
+    }
+}
+
+function Test-AppOwnedPath {
+    param([string]$Path, [string[]]$InstallRoots)
+    # Use Windows path semantics also in portable mocked tests. Unknown/relative/traversal paths fail closed.
+    if (-not $Path -or $Path -notmatch '^[A-Za-z]:\\' -or
+        $Path -match '(^|[\\/])\.{1,2}([\\/]|$)' -or $Path.Contains('/')) { return $false }
+    foreach ($root in $InstallRoots) {
+        if ($root -and $root -match '^[A-Za-z]:\\' -and
+            $root -notmatch '(^|[\\/])\.{1,2}([\\/]|$)' -and -not $root.Contains('/') -and
+            $Path.StartsWith($root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
 }
 
 function Resolve-MsixPath {
@@ -201,8 +334,16 @@ function Resolve-MsixPath {
 }
 
 function Get-LicensePath {
-    $p = Join-Path $script:PkgDir 'ChatGPT-License.xml'
-    if (Test-Path -LiteralPath $p) { return $p }
+    param([string]$Path = (Join-Path $script:PkgDir 'ChatGPT-License.xml'))
+    if (Test-Path -LiteralPath $Path) {
+        try {
+            $license = [xml](Get-Content -LiteralPath $Path -Raw -ErrorAction Stop)
+            if ($license.DocumentElement.LocalName -ne 'License') { throw '缺少 License 根元素。' }
+            return $Path
+        } catch {
+            Write-Warn2 "忽略无效的离线授权文件：$($_.Exception.Message)"
+        }
+    }
     return $null
 }
 
@@ -218,6 +359,7 @@ function Resolve-AppxError {
         '0x80073CFD' = '系统未允许旁加载应用：请在「设置 → 系统 → 开发者选项」中打开“旁加载应用”。'
         '0x80073D06' = '系统中已存在更高版本的 ChatGPT，请先卸载后再安装。'
         '0x80073D02' = '应用正在运行中：请完全退出 ChatGPT（含托盘图标）后重试。'
+        '0x80073D28' = '该安装包内含系统服务组件，必须以管理员身份安装。请双击安装 .bat（会自动请求管理员权限），或右键选择“以管理员身份运行”后重试。'
         '0x80070103' = '系统认为已安装相同版本，无需重复安装。'
         '0x800B0109' = '证书链不受信任：安装包可能已损坏或被篡改，建议重新下载。'
         '0x800B0100' = '安装包没有有效签名：文件可能在传输中损坏，建议重新下载。'
