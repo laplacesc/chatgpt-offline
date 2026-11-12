@@ -192,7 +192,8 @@ $null = [Net.WebRequest]::RegisterPrefix('fixture:', (New-Object FixtureCreator)
 $script:UrlMsixX64 = 'fixture://packages/ChatGPT-x64.msix'
 $script:UrlMsixArm64 = 'fixture://packages/ChatGPT-arm64.msix'
 $script:UrlLicense = 'fixture://packages/ChatGPT-License.xml'
-$env:SystemRoot = Join-Path $fixtureRoot 'windows'
+# .NET Framework resolves assemblies through SystemRoot; preserve the real Windows directory.
+if (-not $env:SystemRoot) { $env:SystemRoot = Join-Path $fixtureRoot 'windows' }
 $script:curlPath = Join-Path $env:SystemRoot 'System32\curl.exe'
 function Test-Path {
     [CmdletBinding()]
