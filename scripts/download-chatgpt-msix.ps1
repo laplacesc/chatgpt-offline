@@ -222,5 +222,5 @@ try {
         Write-Host '按任意键关闭窗口…' -ForegroundColor DarkGray
         try { $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { Read-Host | Out-Null }
     }
-    exit $exitCode
 }
+exit $exitCode
