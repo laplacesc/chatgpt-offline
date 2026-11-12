@@ -157,7 +157,11 @@ function Get-MsixInfo {
         $info = & $script:originalMsixReader -Path $Path
         Record-Call 'manifest:ok'
         return $info
-    } catch { Record-Call 'manifest:failed'; throw }
+    } catch {
+        Record-Call ('manifest:error:' + ((Get-TestErrorDetails $_) | ConvertTo-Json -Depth 12 -Compress))
+        Record-Call 'manifest:failed'
+        throw
+    }
 }
 function Start-AppLog { param($Name) return 'fixture.log' }
 function Stop-AppLog { }
