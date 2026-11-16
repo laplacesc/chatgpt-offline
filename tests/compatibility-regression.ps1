@@ -70,7 +70,7 @@ Test-Case 'log creation failures do not return a fictitious log path' {
     try {
         $script:LogDir = $blockedPath
         $result = Start-AppLog -Name 'test'
-        Assert-True ($null -eq $result) 'An unavailable log file was reported as created'
+        Assert-True ($null -eq $result) "An unavailable log file was reported as created: $result (blocked directory: $blockedPath)"
     } finally {
         $script:LogDir = $originalLogDir
         Remove-Item -LiteralPath $blockedPath -Force

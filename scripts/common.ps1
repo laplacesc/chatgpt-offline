@@ -58,8 +58,9 @@ function Format-Size {
 function Start-AppLog {
     param([string]$Name)
     try {
-        if (-not (Test-Path -LiteralPath $script:LogDir)) {
-            New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $script:LogDir -Force -ErrorAction Stop | Out-Null
+        if (-not (Test-Path -LiteralPath $script:LogDir -PathType Container)) {
+            throw '日志路径不是可用目录。'
         }
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
         $path  = Join-Path $script:LogDir "$Name-$stamp.log"
