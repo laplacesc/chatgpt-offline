@@ -7,6 +7,10 @@ pkg/*.download/
 # 运行日志
 log/*.log
 
+# pi goal 运行状态
+/.pi/goals/
+/.pi/.goals-pool-snapshot.json
+
 # 系统杂项
 Thumbs.db
 desktop.ini
