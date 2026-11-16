@@ -60,9 +60,9 @@ function Invoke-Download {
     if (Test-Path -LiteralPath $curl) {
         Write-Info '下载引擎: curl.exe'
         # 不传 -C：URL 和文件大小都不能证明本地片段属于当前资源。
-        $args = @('-L', '--fail', '--retry', '3', '--retry-delay', '2',
+        $curlArgs = @('-L', '--fail', '--retry', '3', '--retry-delay', '2',
                   '--connect-timeout', '30', '--progress-bar', '-o', $Destination, $Url)
-        & $curl @args
+        & $curl @curlArgs
         if ($LASTEXITCODE -ne 0) { throw "curl 下载失败，退出码 $LASTEXITCODE。" }
         return
     }

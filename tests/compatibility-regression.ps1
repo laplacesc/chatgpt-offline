@@ -58,6 +58,24 @@ Test-Case 'structured child diagnostics retain exception types, inner exception 
         Assert-True ($r.Code -ne 0 -and $details -match 'InvalidOperationException' -and $details -match 'IOException' -and $details -match 'Fail-Fixture') "exception evidence lost: $($r | ConvertTo-Json -Depth 12)"
     } finally { Remove-Item -LiteralPath $dir -Recurse -Force }
 }
+Test-Case 'disk space thresholds retain precision below the required minimum' {
+    . (Join-Path $repo 'scripts/common.ps1')
+    function Get-PSDrive { param($Name, $ErrorAction) [pscustomobject]@{ Free = 2.96GB } }
+    Assert-True ((Get-FreeSpaceGB -DriveLetter 'C:') -lt 3) '2.96 GB was rounded up to the 3 GB minimum'
+}
+Test-Case 'log creation failures do not return a fictitious log path' {
+    . (Join-Path $repo 'scripts/common.ps1')
+    $originalLogDir = $script:LogDir
+    $blockedPath = [IO.Path]::GetTempFileName()
+    try {
+        $script:LogDir = $blockedPath
+        $result = Start-AppLog -Name 'test'
+        Assert-True ($null -eq $result) 'An unavailable log file was reported as created'
+    } finally {
+        $script:LogDir = $originalLogDir
+        Remove-Item -LiteralPath $blockedPath -Force
+    }
+}
 if ($env:OS -eq 'Windows_NT') {
     Test-Case 'isolated CMD code-page changes cannot alter the parent console, including failure' {
         $before = Get-TestConsoleState

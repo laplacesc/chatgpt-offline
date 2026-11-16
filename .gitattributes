@@ -5,4 +5,5 @@
 
 # 二进制，不做任何转换
 *.msix binary
+*.msixbundle binary
 *.appx binary

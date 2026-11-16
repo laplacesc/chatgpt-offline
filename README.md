@@ -59,10 +59,12 @@ chatgpt-offline/
 ├─ pkg/                          安装包与离线授权文件存放处
 │  ├─ 任意文件名.msix            安装包无需改名（已在 .gitignore 中排除）
 │  └─ ChatGPT-License.xml        离线授权文件，用于整机预置
-└─ log/                          每次运行的完整日志，排查问题时看这里
+└─ log/                          运行时自动创建，存放执行日志（已忽略）
 ```
 
 ---
+
+自动选择安装包时，优先使用 `ChatGPT-<当前架构>.msix`，否则使用最近修改的 `.msix` 文件；建议只保留本次要安装的包。离线授权文件用于整机预置，缺失或 XML 损坏时改用 `-SkipLicense`，不影响当前用户安装。
 
 ## 安装脚本做了什么
 
@@ -72,7 +74,7 @@ chatgpt-offline/
 4. **处理旧版本** — 同版本跳过、低版本升级、高版本降级前先征求确认。降级使用 [`Add-AppxPackage -ForceUpdateFromAnyVersion`](https://learn.microsoft.com/en-us/powershell/module/appx/add-appxpackage?view=windowsserver2025-ps#-forceupdatefromanyversion) 就地部署，不预先卸载；宿主不支持时明确拒绝。降级只针对当前用户，跳过整机预置，不改变其他用户及已有预置版本。旧版应用对新版数据格式的兼容性由应用决定，降级前仍建议备份重要数据。
 5. **开启旁加载** — 若系统策略禁止安装本地应用包，自动放行。
 6. **安装** — 先给当前用户装好（立刻可用），再整机预置（新建的用户账户登录后也能直接用）。
-7. **复查** — 确认包已注册、沙箱服务状态正常，并打印安装位置。
+7. **复查** — 确认包已注册且版本符合预期，显示沙箱服务状态及安装位置。
 
 ## 卸载脚本做了什么
 
@@ -202,16 +204,16 @@ Get-AuthenticodeSignature .\pkg\ChatGPT-x64.msix | Format-List Status, SignerCer
 使用 `安装ChatGPT桌面版.bat -InstallDrive D:`。目标盘需为本地固定磁盘、NTFS 格式，并留有足够空间；不要手动移动或修改 `WindowsApps` 下的文件。
 
 **装完了，开始菜单里搜不到？**
-按 Win 键直接输 `chatgpt`。若仍搜不到，注销一次再登录；整机预置的包需要重新登录才对已有账户生效。
+按 Win 键直接输 `chatgpt`。若仍搜不到，注销一次再登录。整机预置主要面向新用户；已有账户需要以各自身份运行安装脚本。
 
 **提示"应用正在使用中"（0x80073D02）**
 ChatGPT 没完全退出。右下角托盘图标右键退出，或在任务管理器里结束 `ChatGPT.exe`，再重试。
 
 **提示"无法安装此应用包"（0x80073CFD）**
-系统禁止了旁加载。用管理员身份运行安装脚本，脚本会自动放行；也可手动到「设置 → 系统 → 开发者选项」打开"旁加载应用"。
+系统不满足应用安装前提条件。请核对系统版本、应用清单要求及安装策略；该错误不一定由旁加载设置引起。
 
 **提示证书不受信任（0x800B0109）**
-安装包在传输中损坏了。删掉 `pkg\` 里的 msix，重新运行下载脚本。
+先检查系统时间、受信任根证书及 Windows 更新；离线机器可能缺少证书链。确认文件来源后重新下载，不能仅凭此错误断定安装包损坏。
 
 **下载到一半断了**
 重新运行 `下载ChatGPT安装包.bat`，会重新完整下载。固定地址可能已经更新，旧片段不会与新版本拼接。长度或签名校验失败不会被当作完整包；普通重跑会重新下载。
@@ -252,7 +254,7 @@ powershell -NoProfile -File tests\download-regression.ps1
 
 源码检查验证 BOM、CRLF、解析及 PowerShell 5.1 语法边界。GitHub Actions 的 Windows PowerShell 5.1 和 PowerShell 7 两条腿均通过 `-File` 调用总入口，并保留诊断；配置存在不代表 CI 已通过。
 
-2026-11-12 用户实机报告确认 Windows 11 x64 / Windows PowerShell 5.1 的 D1–D4 真实安装、启动、幂等、卸载、中断及取消 UAC 测试通过；报告同时记录了 D5–D7 的测试夹具与兼容问题。该历史结果不作为本轮改动的验收。此后本轮仅在 macOS PowerShell 7 上验证了隔离夹具；PS5.1 下载套件原有 9 项失败尚需新诊断在原生环境复核，不能宣称已定位或通过。双账户真实 UAC、MSIX 就地降级和失败恢复、实际服务查询权限与删除等待状态、原生下载引擎及本轮完整 BAT 隔离行为仍需对应环境验证。本工具不再查询或修改防火墙规则。
+2026-11-12 用户实机报告确认 Windows 11 x64 / Windows PowerShell 5.1 的 D1–D4 真实安装、启动、幂等、卸载、中断及取消 UAC 测试通过；报告同时记录了 D5–D7 的测试夹具与兼容问题。该历史结果不作为本轮改动的验收。此前 PS5.1 下载夹具的问题已通过显式加载压缩依赖、保留 Windows SystemRoot 等修复处理；Windows PowerShell 5.1 和 PowerShell 7 的隔离回归执行结果以 [GitHub Actions](https://github.com/laplacesc/chatgpt-offline/actions) 对应提交为准。双账户真实 UAC、MSIX 就地降级和失败恢复、实际服务查询权限与删除等待状态、原生下载引擎及本轮完整 BAT 隔离行为仍需对应环境验证。本工具不再查询或修改防火墙规则。
 
 ---
 

@@ -76,7 +76,7 @@ try {
     Write-Info "操作系统  : Windows Build $build"
     Write-Info "CPU 架构  : $arch"
     Write-Info "管理员权限: $(if ($isAdmin) { '是' } else { '否' })"
-    Write-Info "可用空间  : $(if ($freeGB -ge 0) { "$freeGB GB ($spaceDrive)" } else { '未知' })"
+    Write-Info "可用空间  : $(if ($freeGB -ge 0) { "$([math]::Round($freeGB, 1)) GB ($spaceDrive)" } else { '未知' })"
 
     if ($build -lt $MinOsBuild) {
         throw "系统版本过低：需要 Windows 10 Build $MinOsBuild（2004 版）或更高，当前为 Build $build。"

@@ -57,15 +57,18 @@ function Format-Size {
 # ============================================================
 function Start-AppLog {
     param([string]$Name)
-    if (-not (Test-Path $script:LogDir)) {
-        New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null
-    }
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $path  = Join-Path $script:LogDir "$Name-$stamp.log"
     try {
-        Start-Transcript -Path $path -Force | Out-Null
-    } catch { }
-    return $path
+        if (-not (Test-Path -LiteralPath $script:LogDir)) {
+            New-Item -ItemType Directory -Path $script:LogDir -Force | Out-Null
+        }
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+        $path  = Join-Path $script:LogDir "$Name-$stamp.log"
+        Start-Transcript -Path $path -ErrorAction Stop | Out-Null
+        return $path
+    } catch {
+        Write-Warn2 "无法创建运行日志：$($_.Exception.Message)"
+        return $null
+    }
 }
 
 function Stop-AppLog {
@@ -151,7 +154,7 @@ function Get-FreeSpaceGB {
     param([string]$DriveLetter = $env:SystemDrive)
     try {
         $d = Get-PSDrive -Name $DriveLetter.TrimEnd(':') -ErrorAction Stop
-        return [math]::Round($d.Free / 1GB, 1)
+        return $d.Free / 1GB
     } catch { return -1 }
 }
 
@@ -225,14 +228,12 @@ function Get-MsixInfo {
     $zip = $null
     try {
         $zip   = [System.IO.Compression.ZipFile]::OpenRead($Path)
-        $entry = $zip.Entries | Where-Object { $_.FullName -eq 'AppxManifest.xml' } | Select-Object -First 1
+        $entry = $zip.GetEntry('AppxManifest.xml')
         if (-not $entry) { throw '压缩包内没有 AppxManifest.xml，这不是一个有效的 MSIX 文件。' }
 
         $reader = New-Object System.IO.StreamReader($entry.Open())
-        $xmlTxt = $reader.ReadToEnd()
-        $reader.Dispose()
-
-        [xml]$xml = $xmlTxt
+        try { [xml]$xml = $reader.ReadToEnd() }
+        finally { $reader.Dispose() }
         $identity = $xml.Package.Identity
         return [pscustomobject]@{
             Name         = $identity.Name
@@ -356,12 +357,12 @@ function Resolve-AppxError {
     $map = @{
         '0x80073CF3' = '包依赖校验失败：系统版本过低或缺少运行库，请先安装 Windows 更新。'
         '0x80073CF9' = '安装服务内部错误：通常重启电脑后重试即可解决。'
-        '0x80073CFD' = '系统未允许旁加载应用：请在「设置 → 系统 → 开发者选项」中打开“旁加载应用”。'
+        '0x80073CFD' = '系统不满足安装前提条件：请核对系统版本、应用清单要求及安装策略。'
         '0x80073D06' = '系统中已存在更高版本的 ChatGPT，请先卸载后再安装。'
         '0x80073D02' = '应用正在运行中：请完全退出 ChatGPT（含托盘图标）后重试。'
         '0x80073D28' = '该安装包内含系统服务组件，必须以管理员身份安装。请双击安装 .bat（会自动请求管理员权限），或右键选择“以管理员身份运行”后重试。'
         '0x80070103' = '系统认为已安装相同版本，无需重复安装。'
-        '0x800B0109' = '证书链不受信任：安装包可能已损坏或被篡改，建议重新下载。'
+        '0x800B0109' = '证书链不受信任：请检查系统时间、根证书与 Windows 更新，并核对文件来源。'
         '0x800B0100' = '安装包没有有效签名：文件可能在传输中损坏，建议重新下载。'
         '0x80080204' = '安装包内容损坏：请重新下载安装包。'
         '0x80070005' = '权限不足：请以管理员身份运行本脚本。'
